@@ -1,0 +1,8 @@
+# 本地备份（darwin 回退点），不推送
+*.bak.*
+# Python 缓存
+__pycache__/
+*.pyc
+# 运行产物
+outputs/
+*.log
