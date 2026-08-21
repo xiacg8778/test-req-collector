@@ -32,20 +32,16 @@ agent_created: true
 
 ## 用法
 
-### 0. 环境（二选一）
+### 0. 环境
 
-本机已有 Playwright 环境（零安装，推荐）：
+在当前 WorkBuddy macOS 托管环境中使用隔离 Python：
 ```bash
-PY=/c/ProgramData/miniconda3/python.exe    # 含 playwright 1.60 + chromium
+PY=/Users/xiacg/.workbuddy/binaries/python/envs/default/bin/python3
+$PY -m pip install -r requirements.txt
+$PY -m playwright install chromium
 ```
 
-标准 venv（可移植）：
-```bash
-cd <skill 目录>
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt
-.venv/Scripts/playwright install chromium
-```
+不要使用系统 `python`/`pip`，也不要把依赖安装到全局环境。其他机器需将 `PY` 替换为已安装 Playwright 与 Chromium 的隔离 Python 绝对路径。
 
 ### 1. 采集（核心命令）
 
@@ -63,20 +59,34 @@ $PY scripts/collect.py "https://example.com" --follow-links --max-pages 3 -o out
 #   --wait-ms 5000       页面加载后额外等待（SPA 用）
 #   --timeout-ms 30000   页面加载超时
 #   --no-screenshots     跳过截图（纯元素采集）
+
+# v2: 认证态采集（登录后页面）
+$PY scripts/collect.py "https://app.example.com/orders" \
+  --storage-state auth.json --environment test \
+  --allowed-origin "https://app.example.com" \
+  --auth-success-marker "欢迎" -o outputs/authed
+
+# v2: 受控 L2 行为采集（journey runner）
+$PY scripts/run_journey.py journey.json --storage-state auth.json --allow-write -o outputs/journeys
+# 门禁: risk=destructive 一律拒绝; risk=write 需 --allow-write 且 recipe 必须有 data_namespace
+# 产物: {journey_id}_behavior_events.json (逐步 ui_diff/快照引用/错误) + {journey_id}_network_events.json (仅元数据, 正文不保存)
 ```
 
 产物（`outputs/demo/` 下）：
-- `report.md` — 采集总览：每页标题/URL/元素统计/关注点命中
-- `site-{slug}/page-{n}-{slug}/` — 每页：`page.md`（页面摘要）、`elements.json`（结构化元素清单）、`screenshot.png`（全页截图）
+- `report.md` — 采集总览：每页标题/URL/元素统计/表格/关注点命中
+- `manifest.json` — schema v2：run_id、认证态状态、每页 evidence_id 与 content_hash
+- `site-{slug}/page-{n}-{slug}/` — 每页：`page.md`（页面摘要）、`elements.json`（v1 兼容元素清单）、`static_inventory.json`（v2 增强证据：字段约束/下拉选项/表格结构/locator 候选/静态指纹，fact_level=OBSERVED）、`screenshot.png`（全页截图）
 
 ### 2. 生成测试点（可选，需 LLM）
 
 ```bash
-# 复用本机 vs_config.env 里的 DeepSeek 配置（含 key）
-$PY scripts/gen_test_points.py "outputs/demo" --env-file "C:/AI/vs_config.env"
+# 使用明确提供的环境变量文件（不要在文档或命令中写入密钥）
+$PY scripts/gen_test_points.py "outputs/demo" --env-file "/absolute/path/to/llm.env"
 
 # 或用标准环境变量: VIDEO_SUMMARY_LLM_BASE_URL / VIDEO_SUMMARY_LLM_API_KEY / VIDEO_SUMMARY_MODEL
 # 或 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL
+
+# 当前 gen_test_points.py 只读取 elements.json；screenshot.png 仅作为人工或其他多模态分析器的证据，不会被该脚本消费。
 ```
 
 产物：`test_points.md` — 按页面/模块分组的测试点清单（含优先级、前置条件、预期结果）。
@@ -102,7 +112,7 @@ $PY scripts/gen_test_points.py "outputs/demo" --env-file "C:/AI/vs_config.env"
 | 场景 | 处理 |
 |---|---|
 | 页面加载超时/失败 | 默认超时 30s（`--timeout-ms` 调整），失败页跳过并记入 report.md；全部失败则报错退出 |
-| 需要登录/验证码的站点 | 提示用户提供已登录浏览器 cookie 或先手动登录；不尝试绕过验证码 |
+| 需要登录/验证码的站点 | v2 支持 `--storage-state` 加载登录态并校验：被重定向到登录页或 `--auth-success-marker` 未出现时阻断采集并写入 manifest `auth.status=blocked`；不尝试绕过验证码 |
 | 反爬拦截（429/滑块） | 加 `--wait-ms` 放慢节奏；仍失败则如实报告，**不编造页面内容** |
 | SPA 动态渲染 | 页面加载后额外 `--wait-ms 5000` 再提取 DOM，避免拿到空壳 |
 | 关注点 0 命中 | report.md 标注"0 命中"，提示调整 `--focus` 关键词或检查页面结构 |
@@ -119,8 +129,8 @@ $PY scripts/gen_test_points.py "outputs/demo" --env-file "C:/AI/vs_config.env"
 
 ## 设计要点
 
-- **双通道感知**：截图（视觉，可喂多模态 LLM）+ 结构化元素（DOM，可喂推理 LLM），与视频中"界面截图 + 元素信息"一致
-- **采集与生成解耦**：采集包可反复用于测试点生成、用例编写、自动化定位等下游任务
+- **双通道采集**：同时产出截图和结构化 DOM 元素；当前内置 `gen_test_points.py` 只消费 DOM，截图需由人工或外部多模态分析器单独使用
+- **采集与生成解耦**：采集包可作为测试点和用例设计的证据输入；当前 CSS 路径可能退化到 `nth-of-type`，未经稳定性校验不得直接冻结为长期自动化定位资产
 - **聚焦而非全爬**：`--focus` 让用户圈定功能范围，控制采集成本、贴合测试重点
 - **安全边界**：只读目标站点页面、只写输出目录；不执行页面内任意代码；LLM key 仅从 env 文件/环境变量读取，不落盘不打印
 - **实现原理**：双通道采集的浏览器端 DOM 提取策略、归档格式、LLM 调用细节 → 见 `references/how-it-works.md`
@@ -129,7 +139,8 @@ $PY scripts/gen_test_points.py "outputs/demo" --env-file "C:/AI/vs_config.env"
 
 | 命令 | 说明 |
 |---|---|
-| `collect.py <url>` | 双通道采集（截图+DOM），支持 --focus/--follow-links/--max-pages |
+| `collect.py <url>` | 双通道采集（截图+DOM+schema v2 inventory），支持 --focus/--follow-links/--max-pages/--storage-state |
+| `run_journey.py <journey.json>` | 受控 L2 行为采集；destructive 硬拒、write 需 --allow-write；输出行为/网络证据 |
 | `gen_test_points.py <采集目录>` | 采集包 → LLM → 测试点文档 |
 
 ## 验证
